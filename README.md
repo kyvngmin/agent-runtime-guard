@@ -44,4 +44,3 @@ python auto_subtitle.py
 | small  | 2GB   | 보통  | 좋음   |
 | medium | 5GB   | 보통  | 매우좋음 |
 | large  | 10GB  | 느림  | 최고   |
-"# agent-runtime-guard" 
