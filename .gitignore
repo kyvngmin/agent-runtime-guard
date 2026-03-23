@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.egg-info/
+data/*.db
+.venv/
+dist/
+build/
+.pytest_cache/
+*.txt
+!requirements*.txt
+!pyproject.toml
