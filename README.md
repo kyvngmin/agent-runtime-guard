@@ -1,46 +1,144 @@
-# 자동 자막 파이프라인 설치 가이드
+# Agent Runtime Guard v0.1
 
-## 1. FFmpeg 설치
-https://ffmpeg.org/download.html 에서 Windows 빌드 다운로드
-→ 압축 해제 후 bin 폴더를 시스템 환경변수 PATH에 추가
-→ 확인: 명령프롬프트에서 `ffmpeg -version`
+A security gateway that **detects and blocks malicious prompt/tool/egress chains in real-time** before execution — across LLM, RAG, and AI agent workflows.
 
-## 2. Python 패키지 설치
+> Not a prompt filter. A session-level policy + sequence-based blocking engine.
+
+## Quickstart (30 seconds)
+
 ```bash
-pip install openai-whisper deep-translator watchdog
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-```
-※ CUDA 버전 확인 후 cu121 → cu118 등으로 변경 가능
-※ `nvidia-smi` 명령어로 CUDA 버전 확인
+# 1. Install
+pip install -e ".[dev]"
 
-## 3. 설정 변경 (auto_subtitle.py 상단)
-```python
-INPUT_FOLDER  = r"C:\subtitle_input"   # 원본 영상 폴더
-OUTPUT_FOLDER = r"C:\subtitle_output"  # 완성 영상 폴더
-WHISPER_MODEL = "medium"               # medium 권장 (GPU 4GB 이상)
-FONT_SIZE     = 20                     # 자막 크기 조절
+# 2. API Server
+uvicorn apps.api.main:app --reload
+
+# 3. Console (new terminal)
+streamlit run apps/console/streamlit_app.py
+
+# 4. Open browser → Select "Prompt to Egress Block" → Run Replay
 ```
 
-## 4. 실행
+## Tests
+
 ```bash
-python auto_subtitle.py
+pytest tests/ -q
 ```
 
-## 5. 사용법
-- INPUT_FOLDER에 영상 파일(.mp4, .mkv, .avi 등) 복사
-- 자동 감지 → STT → 번역 → 인코딩
-- OUTPUT_FOLDER에 "_한국어자막.mp4" 파일 생성
-- SRT 파일도 함께 저장됨 (나중에 수정 가능)
+## Smoke Test
 
-## 처리 속도 참고 (medium 모델, GPU 기준)
-- 10분 영상 → 약 2~4분
-- 30분 영상 → 약 6~12분
+With the API server running:
 
-## 모델 크기별 정확도/속도
-| 모델   | VRAM  | 속도  | 정확도 |
-|--------|-------|-------|--------|
-| tiny   | 1GB   | 매우빠름 | 보통  |
-| base   | 1GB   | 빠름  | 보통   |
-| small  | 2GB   | 보통  | 좋음   |
-| medium | 5GB   | 보통  | 매우좋음 |
-| large  | 10GB  | 느림  | 최고   |
+```bash
+python scripts/smoke_runner.py
+```
+
+## Core Scenarios
+
+| Scenario | Expected Result |
+|----------|----------------|
+| Normal Session Allow | `allow` — normal queries pass through |
+| Prompt to Egress Block | `deny` — injection + sensitive query + external exfil blocked |
+| RAG Indirect Injection | `deny` — hidden commands in documents detected |
+| Tool Abuse Sequence | `deny` — sensitive query → dangerous tool → egress chain blocked |
+
+## Architecture
+
+```
+Event Ingestion → Normalization → Correlation → Detection (Rules + Sequence + LLM Security)
+    → Risk Scoring → Policy Decision → Auto-Response
+                                          ↓
+                              Feedback → Tuning Recommendation → Recursive Improvement
+```
+
+## Project Structure
+
+```
+schemas/          Event, detection, risk, policy schemas
+assets/           Crown Jewel registry
+ingestion/        Sensor connectors (mock)
+fabric/           Normalization + session correlation
+detections/       Detection engine (rules + LLM security)
+risk/             Risk scoring engine
+policy/           Policy engine + tool policies
+response/         Auto-response orchestrator
+feedback/         Analyst feedback + tuning recommendations
+storage/          SQLite storage
+apps/api/         FastAPI server
+apps/console/     Streamlit console
+apps/proxy/       Claude API proxy
+scripts/          Smoke test runner
+tests/            pytest tests
+```
+
+## What Makes It Different
+
+- **Session-level flow analysis** — not just single-prompt filtering
+- **Cross-vote risk scoring** — multiple detection signals converge to a single decision
+- **Auto-response** — block, require approval, or terminate based on policy
+- **Recursive improvement loop** — feedback → tuning → better detection over time
+- **Open-source scope** — proxy server, schemas, rulesets, risk engine, policy engine, local dashboard, test suite
+
+## Claude API Proxy
+
+Deploy Agent Runtime Guard as a proxy in front of the Claude API to inspect `tool_use` requests in real-time.
+
+### Setup
+
+```bash
+# Install dependencies (requires httpx)
+pip install -e ".[dev]"
+
+# 1. Guard API server (port 8000)
+uvicorn apps.api.main:app --port 8000 &
+
+# 2. Proxy server (port 8080)
+uvicorn apps.proxy.main:app --port 8080
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | (required) | Anthropic API key |
+| `GUARD_API_URL` | `http://localhost:8000` | Guard API address |
+| `ANTHROPIC_API_URL` | `https://api.anthropic.com` | Anthropic API address |
+
+### Connect with OpenClaw / Claude Code
+
+Just change `ANTHROPIC_BASE_URL` to point to the proxy:
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:8080
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+### Custom Headers
+
+| Header | Description |
+|--------|-------------|
+| `X-Actor-Id` | Requester identity (defaults to `anonymous`) |
+| `X-Session-Id` | Session identity (auto-generated if absent) |
+
+### Request Flow
+
+1. Receive `POST /v1/messages` request
+2. Extract `tool_use` blocks from messages
+3. If `tool_use` found → send SecurityEvent to Guard `/decide` API
+4. Based on result:
+   - **allow** → proxy to Anthropic API (streaming supported)
+   - **deny** → return `403` `{"error": "blocked_by_guard", "reason": "..."}`
+   - **step_up_mfa** → return `202` `{"action": "require_approval", "reason": "..."}`
+5. Requests without `tool_use` are proxied directly (no guard check)
+
+## v0.2 Backlog
+
+- Connect at least one real-world connector
+- Auto-apply policy threshold candidates
+- Separate findings table (performance optimization)
+- Export / reporting
+- Deployment automation
+
+## License
+
+MIT
